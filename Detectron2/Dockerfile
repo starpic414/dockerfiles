@@ -1,16 +1,14 @@
-ARG UBUNTU_VERSION=18.04
-
-ARG ARCH=
-ARG CUDA=10.0
-FROM nvidia/cuda:10.0-cudnn7-devel-ubuntu18.04
+FROM nvidia/cuda:10.1-cudnn7-devel-ubuntu18.04
 LABEL maintainer="Jayoung Lee(starpic414@gmail.com)"
-# ARCH and CUDA are specified again because the FROM directive resets ARGs
-# (but their default value is retained if set previously)
 
 # Needed for string substitution
 SHELL ["/bin/bash", "-c"]
-# Pick up some TF dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+
+ENV DEBIAN_FRONTEND noninteractive
+RUN apt-get update && apt-get install -y \
+	ca-certificates git wget \
+	cmake ninja-build protobuf-compiler libprotobuf-dev pandoc texlive-xetex
+RUN apt-get install -y --no-install-recommends \
         build-essential \
         curl \
         libfreetype6-dev \
@@ -23,32 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libjpeg-dev \
         libswscale-dev \
         pkg-config \
-        software-properties-common \
-        git \
-        wget \
-        ca-certificates \
-        libtool \
-        automake \
-        unzip
-
-RUN apt-get install -y pandoc && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y texlive-xetex
-
-ARG CUDA=10.0
-
-RUN [ ${ARCH} = ppc64le ] || (apt-get update && \
-        apt-get install -y --no-install-recommends libnvinfer5=5.1.5-1+cuda${CUDA} \
-        && apt-get clean \
-        && rm -rf /var/lib/apt/lists/*)
-
-# For CUDA profiling, TensorFlow requires CUPTI.
-ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-
-# Link the libcuda stub to the location where tensorflow is searching for it and reconfigure
-# dynamic linker run-time bindings
-RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1 \
-    && echo "/usr/local/cuda/lib64/stubs" > /etc/ld.so.conf.d/z-cuda-stubs.conf \
-    && ldconfig
+        software-properties-common
+RUN rm -rf /var/lib/apt/lists/*
 
 ARG USE_PYTHON_3_NOT_2=True
 ARG _PY_SUFFIX=${USE_PYTHON_3_NOT_2:+3}
@@ -66,66 +40,64 @@ RUN ${PIP} install --upgrade \
     pip \
     setuptools
 
-RUN ${PIP} install keras \
-    pandas \
-    scipy \
-    scikit-learn \
-    scikit-image \
-    pillow \
-    pydot \
-    opencv-contrib-python \
-    Cython \
-    contextlib2
+RUN ln -s $(which ${PYTHON}) /usr/local/bin/python
 
-RUN ${PIP} install jovian --upgrade
+# install dependencies
+# See https://pytorch.org/ for other options if you use a different version of CUDA
+RUN pip install tensorboard
+RUN pip install torch==1.5 torchvision==0.6 -f https://download.pytorch.org/whl/cu101/torch_stable.html
+RUN pip install keras \
+	pandas \
+	scipy \
+	scikit-learn \
+	scikit-image \
+	pillow \
+	pydot \
+	Cython \
+	contextlib2 \
+	tqdm \
+	matplotlib \
+	seaborn \
+	opencv-contrib-python \
+    missingno
 
-RUN pip install torch torchvision
-RUN pip install	'git+https://github.com/facebookresearch/fvcore'
-RUN pip install 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'
+RUN pip install jupyter
+RUN pip install jupyter_http_over_ws
+RUN pip install jupyterlab
 
+RUN jupyter serverextension enable --py jupyter_http_over_ws
+
+RUN pip install --user 'git+https://github.com/facebookresearch/fvcore'
+# install detectron2
 RUN git clone https://github.com/facebookresearch/detectron2 /dl/detectron2_repo
+# set FORCE_CUDA because during `docker build` cuda is not accessible
 ENV FORCE_CUDA="1"
-ENV TORCH_CUDA_ARCH_LIST="Maxwell;Maxwell+Tegra;Pascal;Volta;Turing"
+# This will by default build detectron2 for all common cuda architectures and take a lot more time,
+# because inside `docker build`, there is no way to tell which architecture will be used.
+ARG TORCH_CUDA_ARCH_LIST="Kepler;Kepler+Tesla;Maxwell;Maxwell+Tegra;Pascal;Volta;Turing"
+ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
+
 RUN pip install -e /dl/detectron2_repo
 
-# Some TF tools expect a "python" binary
-RUN ln -s $(which ${PYTHON}) /usr/local/bin/python 
-
-
-# Options:
-#   tensorflow
-#   tensorflow-gpu
-#   tf-nightly
-#   tf-nightly-gpu
-# Set --build-arg TF_PACKAGE_VERSION=1.11.0rc0 to install a specific version.
-# Installs the latest version by default.
-ARG TF_PACKAGE=tensorflow-gpu
-ARG TF_PACKAGE_VERSION=
-RUN ${PIP} install ${TF_PACKAGE}${TF_PACKAGE_VERSION:+==${TF_PACKAGE_VERSION}}
+# Set a fixed model cache directory.
+ENV FVCORE_CACHE="/tmp"
+# WORKDIR /home/appuser/detectron2_repo
 
 COPY bashrc/.bashrc /etc/bash.bashrc
 RUN chmod a+rwx /etc/bash.bashrc
 
-RUN ${PIP} install jupyter matplotlib
-RUN ${PIP} install jupyter_http_over_ws
-RUN ${PIP} install jupyterlab
-
-RUN jupyter serverextension enable --py jupyter_http_over_ws
-
-RUN mkdir -p /dl/tensorflow-tutorials && chmod -R a+rwx /dl/
-RUN mkdir /.local && chmod a+rwx /.local
-WORKDIR /dl/tensorflow-tutorials
-RUN wget https://raw.githubusercontent.com/tensorflow/docs/master/site/en/tutorials/keras/classification.ipynb
-RUN wget https://raw.githubusercontent.com/tensorflow/docs/master/site/en/tutorials/keras/overfit_and_underfit.ipynb
-RUN wget https://raw.githubusercontent.com/tensorflow/docs/master/site/en/tutorials/keras/regression.ipynb
-RUN wget https://raw.githubusercontent.com/tensorflow/docs/master/site/en/tutorials/keras/save_and_load.ipynb
-RUN wget https://raw.githubusercontent.com/tensorflow/docs/master/site/en/tutorials/keras/text_classification.ipynb
-RUN wget https://raw.githubusercontent.com/tensorflow/docs/master/site/en/tutorials/keras/text_classification_with_hub.ipynb
-RUN apt-get autoremove -y
+RUN mkdir /dl/work
 WORKDIR /dl
+
 EXPOSE 8888
 EXPOSE 6006
 
 RUN ${PYTHON} -m ipykernel.kernelspec
 
 CMD ["bash", "-c", "source /etc/bash.bashrc && jupyter lab --notebook-dir=/dl --ip 0.0.0.0 --no-browser --allow-root"]
+# run detectron2 under user "appuser":
+# wget http://images.cocodataset.org/val2017/000000439715.jpg -O input.jpg
+# python3 demo/demo.py  \
+	#--config-file configs/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml \
+	#--input input.jpg --output outputs/ \
+	#--opts MODEL.WEIGHTS detectron2://COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl
