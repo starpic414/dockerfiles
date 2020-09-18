@@ -1,10 +1,19 @@
+# Last modified 09/17/2020
+# Updated torch and torchvision to 1.6 & 0.7 respectively
+# Updated and added non-sudo user.
+# Got buggy..
 FROM nvidia/cuda:10.1-cudnn7-devel-ubuntu18.04
 LABEL maintainer="Jayoung Lee(starpic414@gmail.com)"
 
-# Needed for string substitution
-SHELL ["/bin/bash", "-c"]
+ARG NB_USER="jay"
+ARG NB_UID="1000"
+ARG NB_GID="1000"
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Needed to install tex
 ENV DEBIAN_FRONTEND noninteractive
+
 RUN apt-get update && apt-get install -y \
 	ca-certificates git wget \
 	cmake ninja-build protobuf-compiler libprotobuf-dev pandoc texlive-xetex
@@ -22,31 +31,46 @@ RUN apt-get install -y --no-install-recommends \
         libswscale-dev \
         pkg-config \
         software-properties-common
+
+RUN apt-get install -y python3-opencv python3-dev
+RUN apt-get install -y sudo
 RUN rm -rf /var/lib/apt/lists/*
 
-ARG USE_PYTHON_3_NOT_2=True
-ARG _PY_SUFFIX=${USE_PYTHON_3_NOT_2:+3}
-ARG PYTHON=python${_PY_SUFFIX}
-ARG PIP=pip${_PY_SUFFIX}
+RUN ln -s $(which python3) /usr/local/bin/python
 
-# See http://bugs.python.org/issue19846
-ENV LANG C.UTF-8
+# create a non-root user
+ENV NB_USER=$NB_USER \
+    NB_UID=$NB_UID \
+    NB_GID=$NB_GID \
+    HOME=/home/$NB_USER
 
-RUN apt-get update && apt-get install -y \
-    ${PYTHON} \
-    ${PYTHON}-pip
+# Copy a script that we will use to correct permissions after running certain commands
+COPY fix-permissions /usr/local/bin/fix-permissions
+RUN chmod a+rx /usr/local/bin/fix-permissions
 
-RUN ${PIP} install --upgrade \
-    pip \
-    setuptools
+RUN echo "auth requisite pam_deny.so" >> /etc/pam.d/su && \
+    sed -i.bak -e 's/^%admin/#%admin/' /etc/sudoers && \
+    sed -i.bak -e 's/^%sudo/#%sudo/' /etc/sudoers && \
+    useradd -m -s /bin/bash -N -u $NB_UID $NB_USER && \
+    chmod g+w /etc/passwd && \
+    fix-permissions $HOME 
 
-RUN ln -s $(which ${PYTHON}) /usr/local/bin/python
+USER $NB_UID
+WORKDIR $HOME
+
+RUN mkdir /home/$NB_USER/work && \
+    fix-permissions /home/$NB_USER
+
+ENV PATH="${HOME}/.local/bin:${PATH}"
+RUN wget https://bootstrap.pypa.io/get-pip.py && \
+	python3 get-pip.py --user && \
+	rm get-pip.py && \
+    fix-permissions /home/$NB_USER
 
 # install dependencies
 # See https://pytorch.org/ for other options if you use a different version of CUDA
-RUN pip install tensorboard
-RUN pip install torch==1.5 torchvision==0.6 -f https://download.pytorch.org/whl/cu101/torch_stable.html
-RUN pip install keras \
+RUN pip install --user torch==1.6 torchvision==0.7 -f https://download.pytorch.org/whl/cu101/torch_stable.html
+RUN pip install --user tensorflow \
 	pandas \
 	scipy \
 	scikit-learn \
@@ -58,18 +82,22 @@ RUN pip install keras \
 	tqdm \
 	matplotlib \
 	seaborn \
-	opencv-contrib-python \
-    missingno
+    missingno && \
+    fix-permissions /home/$NB_USER
 
-RUN pip install jupyter
-RUN pip install jupyter_http_over_ws
-RUN pip install jupyterlab
+RUN pip install --user jupyter \
+    jupyter_http_over_ws \
+    jupyterlab && \
+    fix-permissions /home/$NB_USER
 
-RUN jupyter serverextension enable --py jupyter_http_over_ws
+RUN jupyter serverextension enable --py jupyter_http_over_ws --user && \
+    fix-permissions /home/$NB_USER
 
-RUN pip install --user 'git+https://github.com/facebookresearch/fvcore'
+RUN pip install --user 'git+https://github.com/facebookresearch/fvcore' && \
+    fix-permissions /home/$NB_USER
 # install detectron2
-RUN git clone https://github.com/facebookresearch/detectron2 /dl/detectron2_repo
+RUN git clone https://github.com/facebookresearch/detectron2 /home/jay/work/detectron2_repo && \
+    fix-permissions /home/$NB_USER
 # set FORCE_CUDA because during `docker build` cuda is not accessible
 ENV FORCE_CUDA="1"
 # This will by default build detectron2 for all common cuda architectures and take a lot more time,
@@ -77,27 +105,19 @@ ENV FORCE_CUDA="1"
 ARG TORCH_CUDA_ARCH_LIST="Kepler;Kepler+Tesla;Maxwell;Maxwell+Tegra;Pascal;Volta;Turing"
 ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
 
-RUN pip install -e /dl/detectron2_repo
+RUN pip install --user -e /home/jay/work/detectron2_repo && \
+    fix-permissions /home/$NB_USER
 
 # Set a fixed model cache directory.
 ENV FVCORE_CACHE="/tmp"
-# WORKDIR /home/appuser/detectron2_repo
 
-COPY bashrc/.bashrc /etc/bash.bashrc
-RUN chmod a+rwx /etc/bash.bashrc
-
-RUN mkdir /dl/work
-WORKDIR /dl
+RUN mkdir /home/jay/work/python
+WORKDIR /home/jay/work/python
 
 EXPOSE 8888
 EXPOSE 6006
 
-RUN ${PYTHON} -m ipykernel.kernelspec
+RUN python3 -m ipykernel.kernelspec --user && \
+    fix-permissions /home/$NB_USER
 
-CMD ["bash", "-c", "source /etc/bash.bashrc && jupyter lab --notebook-dir=/dl --ip 0.0.0.0 --no-browser --allow-root"]
-# run detectron2 under user "appuser":
-# wget http://images.cocodataset.org/val2017/000000439715.jpg -O input.jpg
-# python3 demo/demo.py  \
-	#--config-file configs/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml \
-	#--input input.jpg --output outputs/ \
-	#--opts MODEL.WEIGHTS detectron2://COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl
+CMD ["bash", "-c", "jupyter lab --notebook-dir=/home/jay/work --ip 0.0.0.0 --no-browser --allow-root"]
